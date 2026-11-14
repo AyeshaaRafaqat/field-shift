@@ -1,0 +1,10 @@
+crop,season,family,duration_days,water_mm,n_fixer,root,residue,heat_tol,frost_tol,drought_tol,income,notes,water_confidence,sources
+Rice,Kharif,Cereal,130,1200,0,1,3,3,1,1,3,"Very high water demand; puddling can damage soil structure; groundwater declining in much of Punjab",Medium,"S1;S2;S3"
+Cotton,Kharif,Malvaceae,180,900,0,4,2,4,1,3,3,"Long season can delay wheat sowing; leaf curl virus and pink bollworm pressure; yield falls if sown late",High,"S1;S4;S5"
+Maize,Kharif,Cereal,115,600,0,3,4,3,1,2,3,"Drought-sensitive at flowering (up to 40% yield loss); pollen suffers above ~35 C; waterlogging for 3 days can cut yield sharply",High,"S1;S8"
+Mungbean,Kharif,Legume,65,300,1,2,3,4,1,4,3,"Short-duration (55-70 day) legume that fits between main crops; older varieties take 90-110 days; check seed and sowing window locally",Low,"S12"
+Sorghum fodder,Kharif,Cereal,90,400,0,4,4,5,1,4,2,"Drought and heat tolerant fodder; young or stressed plants can carry prussic acid (toxic to livestock); low cash income without a fodder market",Low,"S1;S13"
+Wheat,Rabi,Cereal,140,450,0,3,4,2,4,2,3,"Sow about Nov 1-20; later sowing loses roughly 1% yield per day; terminal heat in Feb-Apr cuts grain filling",High,"S1;S2;S6;S7"
+Chickpea,Rabi,Legume,150,250,1,4,3,2,2,4,4,"Drought tolerant but very sensitive to waterlogging; frost at flowering can cause seed failure; blight risk in wet winters; late sowing means heat stress at flowering",Medium,"S9"
+Mustard,Rabi,Brassica,135,350,0,4,3,2,3,3,3,"Sow about Oct 1-Nov 1; sarson types are more frost-sensitive than raya; aphids; heat or drought after flowering cut seed size and yield",Low,"S11"
+Berseem,Rabi,Legume,150,700,1,3,4,2,3,2,3,"Needs frequent irrigation (10-15 per season); strong fodder and nitrogen benefits; value depends on livestock demand",Medium,"S10"

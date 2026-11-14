@@ -1,0 +1,679 @@
+=====================================================================
+FIELD SHIFT: CROP ROTATION EXPLORER
+Complete explanation of what was built, how it works, and how to put
+it on GitHub
+=====================================================================
+
+CONTENTS
+  1. What this project is
+  2. How it meets the challenge brief
+  3. What was built (files and structure)
+  4. Data sources
+  5. How the app works, step by step
+  6. The scoring method (formulas)
+  7. The machine-learning component
+  8. How it was tested, and what was NOT tested
+  9. Running it on your computer
+ 10. Putting it on GitHub (step by step)
+ 11. Publishing a live demo (Streamlit Community Cloud)
+ 12. Working as a team on GitHub
+ 13. Troubleshooting
+ 14. Limitations (say these honestly in your pitch)
+ 15. Suggested two-day plan and demo script
+ 16. Ideas if you have extra time
+
+
+---------------------------------------------------------------------
+1. WHAT THIS PROJECT IS
+---------------------------------------------------------------------
+A web app, written entirely in Python, that helps a farmer compare crop
+rotations. The farmer picks a location, soil type, water availability,
+current crops and priorities (soil health, saving water, resilience,
+income). The app downloads 10 years of NASA climate data for that
+location, measures how stressful the seasons have been, scores a
+library of possible rotations, and shows the current rotation next to
+three alternatives, with plain-language reasons, evidence, benefits,
+risks and information gaps.
+
+It is a "supportive tool": it highlights patterns and possibilities,
+but says clearly that local expertise makes the final call.
+
+
+---------------------------------------------------------------------
+2. HOW IT MEETS THE CHALLENGE BRIEF
+---------------------------------------------------------------------
+Brief requirement                          Where it is covered
+-----------------------------------------  ---------------------------------
+Use NASA Earth observations                NASA POWER (rain, temperature,
+                                           soil wetness); MODIS NDVI
+Use local soil info                        Soil texture selector changes the
+                                           irrigation estimate and risks
+Use crop characteristics                   crops.csv (water need, nitrogen
+                                           fixing, roots, residue, heat/frost/
+                                           drought tolerance, income, notes)
+Use farmer priorities                      Four priority sliders, water limit,
+                                           current rotation input
+Compare at least 3 strategies incl.        Tab 2: current rotation + best match
+the existing rotation                      + soil-health focus + water-saving
+For each: why, evidence, benefits,         Expandable sections on each card
+information gaps, risks                    ("Why suggested", "Evidence &
+                                           benefits", "Risks & gaps")
+Highlight bare-field periods               Optional MODIS NDVI chart + "days
+                                           per year with sparse vegetation"
+Explain scientific terms                   Glossary in tab 1
+Satellite vs ground-based measurements     Glossary + About tab + limitations
+Uncertainty and where local expertise      Score range over 10 years with a
+is needed                                  High/Medium/Low confidence label;
+                                           "where human judgment matters" box
+Compare modelling approaches / use ML      Transparent rule-based scoring plus
+                                           a validated random-forest model
+Harmonize datasets                         Daily data aggregated to seasons
+                                           (a common time basis); see section 4
+Scenario sliders                           Rainfall and warming sliders
+Farmer-centred design                      Plain-language cards, sidebar
+                                           inputs, glossary, disclaimers
+
+Datasets in the brief that were NOT used directly: SMAP, ECOSTRESS,
+GRACE/GRACE-FO, GEDI, SRTM, Landsat. The brief says "you may explore",
+so this is allowed. The About tab lists them as future work. NASA POWER
+already contains model-based soil wetness that is derived from NASA
+land-surface modelling, which is why it stands in for SMAP here.
+
+
+---------------------------------------------------------------------
+3. WHAT WAS BUILT (FILES AND STRUCTURE)
+---------------------------------------------------------------------
+field-shift/
+  app.py                  The web interface (Streamlit).
+  engine/                 All the logic, split into small modules. It
+                          does not import Streamlit, so it can be tested
+                          alone. The app uses it with "import engine as E".
+    config.py             Every setting and threshold in one place
+                          (cities, soil factors, hot-day limits, scoring
+                          weights). Change numbers here, not in the code.
+    common.py             Shared helpers: error type, HTTP retries,
+                          safe cache writing.
+    nasa_power.py         NASA POWER download, cleaning, saved copies.
+    modis.py              MODIS NDVI download and bare-field statistics.
+    crops.py              Loads and checks the crop table.
+    indicators.py         Daily weather -> per-season indicators.
+    ml.py                 Soil-moisture random forest, what-if scenarios,
+                          and the out-of-range warning.
+    scoring.py            Scores every rotation (soil, water, resilience,
+                          income) for each historical year.
+    explain.py            Plain-language reasons, benefits and risks.
+  crops.csv               Crop trait table (9 crops), with confidence
+                          and source codes.
+  CROP_DATA_SOURCES.md    Where each crop value came from, with URLs, plus
+                          what is still judgment.
+  prefetch.py             Downloads data for all preset locations once.
+  tests/test_engine.py    17 automatic tests using synthetic weather and
+                          mocked network calls (no internet needed).
+  requirements.txt        Python packages needed.
+  README.md               Short project overview for GitHub.
+  .gitignore              Tells Git which files not to upload.
+  .streamlit/config.toml  Green colour theme.
+  data_cache/             Created automatically; saved NASA data.
+
+Why this structure: the interface (app.py) and the logic (engine/)
+are separate, and the engine itself is split by job: one module per data
+source (nasa_power.py, modis.py) and one per step (indicators, ml,
+scoring, explain). A teammate can work on one module without touching
+the others, and each can be tested alone. Data flows through the
+modules in the order listed above.
+
+Engine quality features (added in the second version):
+  * Network code retries temporary server errors and reports problems in
+    plain language (DataFetchError) instead of crashing.
+  * NASA data is cleaned: the -999 'no data' code is removed, short gaps
+    in temperature and soil wetness are filled, rainfall gaps are left
+    empty (never invented), and unusable data is rejected.
+  * Saved copies are written safely (no half-written files) and are
+    named by location and date range.
+  * The crop table is validated on load, so a typo such as a rating of 9
+    gives a clear message.
+  * Scores are computed with vectorised numpy rather than loops.
+  * All scoring thresholds live in a ScoringConfig that checks its own
+    weights sum to 1.
+  * The ML report compares the model against a plain "monthly average"
+    guess, and warns when a what-if scenario goes beyond the weather the
+    model was trained on.
+  * Results are returned as typed objects (RotationScore, ModelReport,
+    BareFieldSummary) that also work like dictionaries, e.g. o["total"].
+  * The refactor was verified against the earlier single-file engine:
+    on the same inputs every score matched to rounding error (about
+    1e-15) and the same rotations were picked.
+
+Technology choices and reasons:
+  * Python only: you are a beginner with two days, so one language.
+  * Streamlit: gives sliders, charts, tabs and maps with almost no
+    front-end code. No HTML, CSS or JavaScript needed.
+  * pandas / numpy: standard tools for time-series data.
+  * scikit-learn: simple, reliable random-forest implementation.
+  * requests: to call the NASA web services.
+
+
+---------------------------------------------------------------------
+4. DATA SOURCES
+---------------------------------------------------------------------
+A) NASA POWER (https://power.larc.nasa.gov), daily, 1 May 2014 to
+   30 April 2024, "AG" (agroclimatology) community. No account or API
+   key is required. Variables requested:
+     PRECTOTCORR  corrected precipitation (mm/day)
+     T2M_MAX      daily maximum temperature at 2 m (deg C)
+     T2M_MIN      daily minimum temperature at 2 m (deg C)
+     GWETROOT     root-zone soil wetness (0 = dry, 1 = saturated)
+     EVLAND       land evaporation (requested; the code falls back to
+                  the other four if the service rejects it)
+   The grid is coarse (roughly 50 km), so values are area averages, not
+   field measurements.
+
+B) MODIS MOD13Q1 NDVI (250 m, 16-day), via the ORNL DAAC web service.
+   OPTIONAL: loaded only when the user ticks the checkbox. Used to show
+   how many days per year the vegetation is sparse (NDVI below 0.25),
+   which indicates bare or fallow soil. If this service fails, the app
+   skips it and everything else still works.
+
+C) Crop traits (crops.csv), cross-checked against published sources.
+   The first draft of this table was written from general knowledge. It
+   was then checked against FAO, ICAR, the Cotton Research Institute
+   Multan, Punjab Agriculture Department material and Pakistani
+   research papers. Full details, URLs and what each source supports
+   are in CROP_DATA_SOURCES.md. Summary:
+     * Seasonal water need and growing-period length: supported by
+       sources for all nine crops. Confidence is shown per crop in the
+       water_confidence column (High for wheat, cotton, maize; Medium
+       for rice, chickpea, berseem; Low for mungbean, sorghum fodder,
+       mustard, where sources gave wide ranges or only indirect data).
+     * Several values in the first draft were low and were corrected
+       (for example wheat 400 -> 450 mm, cotton 700 -> 900 mm).
+     * Rice water (1200 mm) is TOTAL field water including puddling
+       and percolation. Other crops use crop evapotranspiration. This
+       is explained in CROP_DATA_SOURCES.md and is a known limitation.
+     * The 1-5 ratings (root depth, residue, heat/frost/drought
+       tolerance) and the income index are still JUDGMENT. Sources
+       support the direction (sorghum is drought tolerant, maize is
+       drought sensitive, chickpea dislikes waterlogging) but not the
+       exact numbers. The income index is a placeholder because no
+       clean, current, comparable per-acre return table for Pakistan's
+       Punjab was found. Say this in your write-up and replace it with
+       Punjab Agriculture Department cost-of-production data if you can.
+     * Several sources are from Indian Punjab, which has a very similar
+       climate and cropping system. Pakistani sources were used where
+       available.
+
+D) Farmer inputs: location, soil texture, water availability, current
+   rotation, priority weights, what-if climate sliders.
+
+How data is harmonized: the datasets have different resolutions (POWER
+~50 km daily, MODIS 250 m every 16 days). The app brings them to a
+common time basis by aggregating everything to the two Punjab growing
+seasons (Kharif May-Oct, Rabi Nov-Apr) per year. Climate indicators are
+per season per year. NDVI is shown as its own time series and summary.
+It is not mixed into the rotation scores.
+
+
+---------------------------------------------------------------------
+5. HOW THE APP WORKS, STEP BY STEP
+---------------------------------------------------------------------
+1. The farmer chooses inputs in the sidebar.
+2. engine.fetch_power_cached() loads 10 years of daily data. If a saved
+   copy exists in data_cache/ it is used (fast, works offline);
+   otherwise it downloads from NASA and saves it.
+3. engine.train_soil_model() trains the ML model on that data (section 7).
+4. engine.season_table() turns daily data into one row per season per
+   year with these indicators:
+     rain        total rainfall (mm)
+     heat        days hotter than 40 deg C (Kharif) or 35 deg C (Rabi)
+     frost       days with minimum temperature of 2 deg C or lower
+     dry_spell   longest run of days with under 1 mm rain
+     wetness     mean root-zone soil wetness
+     dry_soil    days when wetness is in the driest 20% of the record
+   The what-if sliders change rain and temperature here. When the ML
+   option is on, soil wetness is re-estimated by the model.
+5. engine.evaluate_all() scores all 20 possible rotations (5 Kharif
+   crops x 4 Rabi crops) for every one of the 10 historical years.
+6. engine.pick_strategies() selects four to show:
+     - Your current rotation (baseline)
+     - Best match for your priorities (highest weighted total)
+     - Soil-health focus (highest soil score)
+     - Water-saving focus (lowest irrigation need)
+   Alternatives that exceed the farmer's water limit are excluded, and
+   the same rotation is never shown twice.
+7. The explanation functions (why, benefits, risks) write the text for
+   each card by comparing the option with the current rotation.
+
+
+---------------------------------------------------------------------
+6. THE SCORING METHOD (FORMULAS)
+---------------------------------------------------------------------
+Every rotation is one Kharif crop plus one Rabi crop. Each gets four
+scores from 0 to 10.
+
+SOIL HEALTH (does not vary by year)
+  soil = 10 x ( 0.30 x nitrogen_fixer
+              + 0.20 x mean(residue) / 5
+              + 0.15 x mean(root depth) / 5
+              + 0.10 x family_diversity
+              + 0.15 x pest_cycle_break
+              + 0.10 x ground_cover )
+  nitrogen_fixer   1 if either crop is a legume, else 0
+  family_diversity 1 if the two crops are from different plant families
+  pest_cycle_break share of seasons where the crop family differs from
+                   the farmer's current crop in that season (0, 0.5, 1)
+  ground_cover     (days of crop growth in both seasons) / 365, max 1
+
+WATER FIT (per year)
+  irrigation_need = max(0, crop_water x soil_factor - 0.8 x rain)
+                    summed over both seasons
+  water = 10 x (1 - min(1, irrigation_need / 1500))
+  soil_factor: sandy loam 1.15, loam 1.0, clay loam 0.9
+  The 0.8 means only 80% of rain is counted as useful ("effective").
+
+RESILIENCE (per year)
+  For each crop in its season:
+    heat_stress  = min(1, hot_days/30 x (6 - heat_tolerance)/3)
+    frost_stress = min(1, frost_days/15 x (6 - frost_tolerance)/3)
+    dry_stress   = (0.5 x min(1, dry_spell/30)
+                  + 0.5 x min(1, dry_soil_days/60))
+                   x (6 - drought_tolerance)/5
+    stress = 0.4 x heat + 0.3 x frost + 0.3 x dry
+  resilience = 10 x (1 - average stress of the two crops)
+
+INCOME (rough)
+  income = 10 x mean of the two crops' 1-5 income index / 5
+  This is NOT based on real prices or costs.
+
+OVERALL SCORE (per year)
+  total = (w_soil x soil + w_water x water + w_res x resilience
+          + w_income x income) / (sum of weights)
+  The w values are the four sidebar sliders. If all are zero, equal
+  weights are used.
+
+UNCERTAINTY
+  The total is computed separately for each of the 10 historical years.
+  The card shows the mean score and the min-max range. Spread under
+  1.2 points = High confidence, under 2.4 = Medium, otherwise Low. This
+  reflects weather variability, not every source of error.
+
+The thresholds (30 hot days, 15 frost days, 1500 mm, and so on) are
+reasoned starting values, not scientifically calibrated constants.
+Say so, and invite local experts to tune them.
+
+
+---------------------------------------------------------------------
+7. THE MACHINE-LEARNING COMPONENT
+---------------------------------------------------------------------
+Model: random-forest regressor (scikit-learn), 200 trees.
+
+Question it answers: "If rainfall or temperature change, how would
+root-zone soil moisture change at this location?"
+
+Inputs (weather only): rain today, rain over the last 7, 30 and 90
+days, max temperature today, 30-day average max temperature, min
+temperature today, and time of year (as sine and cosine so December
+and January are neighbours). It deliberately does NOT see yesterday's
+soil wetness, so it must learn the weather-to-soil relationship.
+
+Target: NASA POWER root-zone soil wetness (GWETROOT).
+
+Validation: trained only on data before 1 May 2022, then tested on
+May 2022 to April 2024, data it never saw. The app shows R-squared
+(how much variation is explained), average error, and an
+actual-vs-predicted chart. A final model is then trained on all data.
+Time-based splitting matters: shuffling days randomly would leak
+information because neighbouring days are very similar.
+
+How it is used (the "delta method"):
+  1. Predict soil wetness with the real weather.
+  2. Predict soil wetness with the what-if weather.
+  3. Add the difference to the observed wetness record.
+  4. Count dry-soil days from the adjusted record. This feeds the
+     resilience score.
+This keeps baseline results realistic and attributes only the CHANGE to
+the model.
+
+Why the rotation scores themselves are not ML: there is no dataset of
+yields for these exact rotations, so a trained yield model would be
+inventing its answers. A transparent scoring system is more honest and
+easier to explain. ML is used where real training data exists: the
+10-year weather and soil-moisture record.
+
+Known limits: random forests cannot extrapolate beyond conditions seen
+in training, so extreme scenarios (for example +4 deg C) are less
+reliable. Also, POWER soil wetness is itself a model product, so the ML
+learns a model's behaviour, not field truth.
+
+
+---------------------------------------------------------------------
+8. HOW IT WAS TESTED, AND WHAT WAS NOT
+---------------------------------------------------------------------
+TESTED (in the development environment):
+  * All Python files compile without syntax errors.
+  * tests/test_engine.py runs 17 tests using synthetic (made-up)
+    weather, and all five pass:
+      - season table has 20 rows (10 years x 2 seasons)
+      - all scores stay between 0 and 10; strategy list starts with the
+        current rotation and has no duplicates
+      - all-zero priority weights do not crash
+      - the ML model learns a known relationship (R2 above 0.7) and a
+        drier or hotter scenario lowers predicted soil moisture
+      - a low-water rotation needs less irrigation than rice-wheat
+
+NOT TESTED (the development environment had no internet access and no
+Streamlit installed):
+  * Real downloads from NASA POWER and the MODIS service.
+  * The Streamlit interface actually rendering in a browser.
+  * Real-data results (for example, whether the recommended rotations
+    make agronomic sense for real Punjab sites).
+
+So on your FIRST run, expect to possibly fix small things, such as an
+API parameter name or a Streamlit version difference. If you see an
+error, copy the full message and ask for help. Things most likely to
+need adjusting:
+  * The POWER parameter list (the code already falls back if EVLAND is
+    rejected).
+  * The MODIS endpoint format (this layer is optional and wrapped in
+    error handling).
+  * Old Streamlit versions: run  pip install --upgrade streamlit.
+
+Do a real sanity check yourself: run the app for 3 locations and read
+the results. If rice-wheat scores well while you set water to "Low", or
+mungbean-chickpea scores worst, something is off. Adjust the thresholds
+or crop table and re-check.
+
+
+---------------------------------------------------------------------
+9. RUNNING IT ON YOUR COMPUTER
+---------------------------------------------------------------------
+Requirements: Python 3.9 or newer (check with:  python --version).
+
+1. Open a terminal in the project folder (the one containing app.py).
+2. Create an isolated environment (recommended):
+     python -m venv .venv
+     Mac/Linux:   source .venv/bin/activate
+     Windows:     .venv\Scripts\activate
+3. Install the packages:
+     pip install -r requirements.txt
+4. (Optional but recommended, needs internet) download and save data:
+     python prefetch.py
+   You should see "OK" for each of the six cities.
+5. Start the app:
+     streamlit run app.py
+   Your browser opens at http://localhost:8501.
+6. Run the tests any time:
+     python tests/test_engine.py
+
+Changing things:
+  * Add a city: add a name and (latitude, longitude) to SITES at the
+    top of engine/config.py, then run  python prefetch.py.
+  * Change crops: edit crops.csv (keep the column names; "season" must
+    be Kharif or Rabi). New crops appear automatically.
+  * Change colours: edit .streamlit/config.toml.
+  * Change scoring thresholds: edit ScoringConfig in engine/config.py.
+
+
+---------------------------------------------------------------------
+10. PUTTING IT ON GITHUB (STEP BY STEP)
+---------------------------------------------------------------------
+STEP 0. Before you start
+  * Run the app once and make sure it works.
+  * Run  python prefetch.py  so the data_cache/ folder is filled. The
+    .gitignore keeps data_cache/ IN the repository on purpose, so the
+    demo works without internet. (If you do not want it, remove the
+    "#" before data_cache/ in .gitignore.)
+  * Edit README.md and add your team name and members.
+  * Make sure no passwords or keys are in any file. This project uses
+    none.
+
+STEP 1. Create a GitHub account
+  Go to https://github.com and sign up (free). Verify your email.
+
+STEP 2. Install Git
+  Download from https://git-scm.com/downloads and install with the
+  default options. Check it worked:
+     git --version
+
+STEP 3. Tell Git who you are (once per computer)
+  Use the same email as your GitHub account:
+     git config --global user.name "Your Name"
+     git config --global user.email "you@example.com"
+
+STEP 4. Create an empty repository on GitHub
+  1. Click the "+" at the top right, then "New repository".
+  2. Repository name: for example  field-shift-rotation-explorer
+  3. Description: "Crop rotation decision-support tool using NASA
+     Earth observations (NASA Field Shift challenge)".
+  4. Choose Public (challenges often need a public link) or Private.
+  5. IMPORTANT: leave "Add a README", ".gitignore" and "license" all
+     UNTICKED. Your project already has these files, and ticking them
+     causes conflicts.
+  6. Click "Create repository". Keep the page open; it shows your
+     repository's address, like
+     https://github.com/YOUR-USERNAME/field-shift-rotation-explorer.git
+
+STEP 5. Upload your project (command line)
+  In a terminal, go into the project folder:
+     cd path/to/field-shift
+  Then run these commands one at a time:
+     git init
+     git add .
+     git commit -m "Initial commit: Field Shift rotation explorer"
+     git branch -M main
+     git remote add origin https://github.com/YOUR-USERNAME/field-shift-rotation-explorer.git
+     git push -u origin main
+  (Replace YOUR-USERNAME and the repository name with yours.)
+
+STEP 6. Sign in when asked
+  GitHub no longer accepts your account password on the command line.
+  When Git asks for a username and password:
+    * Username: your GitHub username.
+    * Password: a Personal Access Token. Create one at
+      GitHub > your profile picture > Settings > Developer settings >
+      Personal access tokens > Tokens (classic) > Generate new token.
+      Tick the "repo" permission, set an expiry, generate, and COPY it
+      immediately (you cannot see it again). Paste it as the password.
+  On Windows and Mac a sign-in window may appear instead. Choose
+  "Sign in with browser".
+  Never put the token inside a file in the project.
+
+STEP 7. Check it worked
+  Refresh the repository page on GitHub. You should see all your files
+  and the README displayed under them.
+
+ALTERNATIVE A: GitHub Desktop (easiest for beginners)
+  1. Install https://desktop.github.com and sign in.
+  2. File > Add local repository > choose the project folder (if it says
+     it is not a repository, click "create a repository").
+  3. Write a summary (for example "Initial commit") and click "Commit
+     to main".
+  4. Click "Publish repository", choose the name and visibility, and
+     click Publish.
+
+ALTERNATIVE B: Upload through the website (no Git needed)
+  1. On your new empty repository page, click "uploading an existing
+     file".
+  2. Drag in all project files and folders (app.py, the engine folder,
+     crops.csv, prefetch.py, requirements.txt, README.md, .gitignore,
+     the tests folder, the data_cache folder, and the .streamlit
+     folder). Hidden files such as .gitignore may need "show hidden
+     files" on your computer.
+  3. Click "Commit changes".
+  This is fine for a first upload but awkward for updates.
+
+MAKING CHANGES LATER
+  After editing files:
+     git add .
+     git commit -m "Describe what you changed"
+     git push
+
+OPTIONAL POLISH FOR THE REPOSITORY
+  * Add a license: on GitHub click "Add file" > "Create new file", name
+    it LICENSE, and click "Choose a license template" (MIT is a common
+    choice for open projects).
+  * Add screenshots of the app to a "docs" folder and show them in the
+    README with:  ![screenshot](docs/screenshot.png)
+  * Add the "Topics" tags (streamlit, nasa, agriculture, remote-sensing)
+    using the gear icon beside "About" on the repository page.
+  * Put your demo video link and live-demo link at the top of README.md.
+
+
+---------------------------------------------------------------------
+11. PUBLISHING A LIVE DEMO (STREAMLIT COMMUNITY CLOUD, FREE)
+---------------------------------------------------------------------
+A public link is very useful for judges.
+  1. The repository must be on GitHub and public (steps above).
+  2. Go to https://share.streamlit.io and sign in with GitHub.
+  3. Click "Create app" (or "New app"), choose your repository, branch
+     "main", and main file path  app.py.
+  4. Click Deploy. It installs requirements.txt automatically. The first
+     start takes a few minutes.
+  5. You get a URL like https://your-app-name.streamlit.app. Put it in
+     your README and submission.
+Notes:
+  * Because data_cache/ is committed, the preset cities load instantly
+    and never depend on NASA being reachable during judging. Custom
+    coordinates still need a live download.
+  * Free apps go to sleep after inactivity; open the link a few minutes
+    before judging to wake it.
+  * The ML model trains the first time each location is opened (a few
+    seconds), then is cached.
+
+
+---------------------------------------------------------------------
+12. WORKING AS A TEAM ON GITHUB
+---------------------------------------------------------------------
+  * Owner: repository > Settings > Collaborators > Add people.
+  * Everyone else clones the project once:
+       git clone https://github.com/YOUR-USERNAME/REPO-NAME.git
+  * Before starting work each time:   git pull
+  * To avoid stepping on each other, split by file:
+       data/indicators/ML  ->  engine/ (nasa_power, modis, ml, ...)
+       interface           ->  app.py
+       crop table/docs     ->  crops.csv, README.md, this explanation
+  * For safer teamwork, each person works on a branch:
+       git checkout -b my-feature
+       (edit, then)  git add .  &&  git commit -m "message"
+       git push -u origin my-feature
+    Then open a "Pull request" on GitHub for the team to review.
+  * If Git reports a "merge conflict", two people changed the same
+    lines. Open the file, find the markers  <<<<<<<  =======  >>>>>>>,
+    keep the correct version, delete the markers, then
+    git add . and git commit.
+
+
+---------------------------------------------------------------------
+13. TROUBLESHOOTING
+---------------------------------------------------------------------
+"Could not fetch NASA POWER data"
+   Check internet. Try another location. If POWER is down, try later.
+   Once data_cache/ has a file for a location, no internet is needed.
+
+"ModuleNotFoundError: No module named ..."
+   The environment is not active or packages are missing. Activate the
+   virtual environment and run  pip install -r requirements.txt.
+
+st.progress() or other Streamlit errors about unexpected arguments
+   Old Streamlit. Run  pip install --upgrade streamlit.
+
+NDVI says "service unavailable"
+   Optional layer; skip it. The rest works.
+
+App is slow the first time
+   It is downloading data and training the model. Later runs for the
+   same location are cached. Run prefetch.py in advance.
+
+"git push" rejected, or "remote contains work you do not have"
+   You ticked README or license when creating the repository. Run
+     git pull origin main --allow-unrelated-histories
+   then git push.
+
+"Authentication failed" on push
+   Use a Personal Access Token, not your password (section 10, step 6).
+
+Everything looks wrong or all scores are similar
+   Check crops.csv columns for typos, and test with a different
+   location and different sliders.
+
+
+---------------------------------------------------------------------
+14. LIMITATIONS (SAY THESE HONESTLY IN YOUR PITCH)
+---------------------------------------------------------------------
+  * Climate data is a ~50 km model grid, not field measurements.
+    Satellite estimates can differ from ground readings.
+  * Soil is a texture category only: no organic carbon, salinity, pH or
+    lab results.
+  * Crop traits are approximate and need local validation.
+  * Income is a rough index, not prices, costs or yields.
+  * Pests, diseases, seed supply, machinery, labour, canal reliability
+    and markets are not modelled in detail.
+  * Scoring thresholds are reasoned defaults, not calibrated values.
+  * The ML model cannot extrapolate beyond weather seen in 10 years and
+    learns from another model's soil wetness, not probe data.
+  * One Kharif crop plus one Rabi crop per year only; multi-year
+    sequences, intercropping and cover crops are not modelled.
+  * Some listed NASA datasets (SMAP, ECOSTRESS, GRACE, GEDI, SRTM,
+    Landsat) were not integrated.
+Every limitation above is an honest "future work" item. Judges
+generally respect clear limits more than overclaiming.
+
+
+---------------------------------------------------------------------
+15. SUGGESTED TWO-DAY PLAN AND DEMO SCRIPT
+---------------------------------------------------------------------
+DAY 1
+  * Install, run, fix any first-run errors (section 8).
+  * Run prefetch.py. Test 3 locations and read the results critically.
+  * Check and cite the crop table; adjust values where you know better.
+  * Read the engine/ modules with the team so at least two people can explain
+    the scoring and the ML.
+  * Push to GitHub.
+DAY 2
+  * Fix anything odd found in sanity checks; re-run the tests.
+  * Take screenshots; fill in README (team, links).
+  * Deploy on Streamlit Community Cloud (optional but strong).
+  * Record the demo video; write the submission text.
+  * Keep the last 2 hours for final checks only.
+
+DEMO SCRIPT (3 to 4 minutes)
+  1. The problem: farmers face heat, water shortage and soil decline;
+     choosing rotations is hard.
+  2. Show tab 1 for one city: the 10-year picture, the NDVI bare-field
+     chart, and the glossary.
+  3. Enter a current rotation (rice-wheat), set water to Low, and show
+     tab 2: four cards, why/evidence/risks.
+  4. Move the priority sliders to show the ranking change.
+  5. Move the rainfall slider down and warming up; show scores shift
+     and the ML tab's validation chart.
+  6. Switch to another city to show different results.
+  7. Close with limitations and "supports, not replaces, farmer
+     judgment".
+
+LIKELY JUDGE QUESTIONS
+  Q: Why not a deep-learning yield model?
+  A: No reliable yield data for these rotations; we use ML where real
+     training data exists and keep recommendations explainable.
+  Q: How accurate are the recommendations?
+  A: They are decision support based on indicators, not yield
+     forecasts; we show uncertainty ranges and validate the ML model.
+  Q: Why not SMAP/ECOSTRESS?
+  A: Time scope and resolution; the design allows adding them as extra
+     indicators (listed as future work).
+
+
+---------------------------------------------------------------------
+16. IDEAS IF YOU HAVE EXTRA TIME
+---------------------------------------------------------------------
+  * Cluster the 10 years into wet / normal / dry-hot years (KMeans) and
+    show how each rotation scores in each year type.
+  * Add SMAP soil moisture through Google Earth Engine and compare it
+    with POWER soil wetness.
+  * Add SRTM slope (terrain) for erosion risk.
+  * Add Urdu text and icons for the cards.
+  * Add multi-year rotations (three or four seasons) and cover crops.
+  * Replace the crop table with values from a cited local source and
+    add a "data source" column.
+
+=====================================================================
+END
+=====================================================================
