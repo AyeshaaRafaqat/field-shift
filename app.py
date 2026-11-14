@@ -1,581 +1,574 @@
-"""Field Shift - Agro-Climatic Crop Rotation Decision Support Tool.
+"""Field Shift — Agro-Climatic Crop Rotation Decision Support Platform.
 
-A professional, practical evaluation platform designed for farmers, agronomists,
-and field officers to compare crop rotations against 10-year historical climate
-conditions, water availability, and soil characteristics.
+NASA Space Apps Challenge 2026 | Team astrooLogic (Lahore, Pakistan)
+Ayesha Rafaqat · Sara Haris
 """
-
 from __future__ import annotations
 
 import os
-from datetime import date
-from typing import Dict, List, Tuple
+from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
+import plotly.express as px
 import streamlit as st
+import yaml
 
 from analysis.climate_analysis import DEFAULT_SEASONS, analyse_climate
-from analysis.rotation_scorer import (
-    ROTATION_CATALOG,
-    RotationScoreCard,
-    RotationScorer,
-)
-from services.modis_data import (
-    fetch_modis_ndvi_data,
-    summarize_bare_soil_exposure,
-)
-from services.nasa_data import (
-    DEFAULT_END_DATE,
-    DEFAULT_START_DATE,
-    NasaPowerError,
-    fetch_nasa_power_data,
-)
+from analysis.rotation_scorer import ROTATION_CATALOG, RotationScoreCard, RotationScorer
+from engine.montecarlo import UncertaintySummary, run_monte_carlo_analysis
+from services.modis_data import fetch_modis_ndvi_data, summarize_bare_soil_exposure
+from services.nasa_data import DEFAULT_END_DATE, DEFAULT_START_DATE, NasaPowerError, fetch_nasa_power_data
+from ui.components import farm_profile_card, insight_card, persistent_expert_banner, top_header
+from ui.theme import apply_custom_theme
 
-# -----------------------------------------------------------------------------
-# Configuration & Minimal Professional Styling
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Page config
+# ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Field Shift | Crop Rotation Decision Tool",
+    page_title="Field Shift | NASA Agro-Climatic Rotation Advisor",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
-st.markdown(
-    """
-    <style>
-    /* Clean, high-contrast, professional typography & layout */
-    html, body, [class*="css"] {
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-        color: #1F2937;
-    }
-    .top-bar {
-        border-bottom: 1px solid #E5E7EB;
-        padding-bottom: 16px;
-        margin-bottom: 24px;
-    }
-    .top-title {
-        font-size: 1.85rem;
-        font-weight: 700;
-        color: #111827;
-        margin: 0;
-        letter-spacing: -0.02em;
-    }
-    .top-subtitle {
-        font-size: 0.95rem;
-        color: #4B5563;
-        margin-top: 4px;
-        margin-bottom: 0;
-    }
-    .step-heading {
-        font-size: 1.05rem;
-        font-weight: 600;
-        color: #111827;
-        margin-bottom: 12px;
-        padding-bottom: 6px;
-        border-bottom: 2px solid #E5E7EB;
-    }
-    .card {
-        background-color: #FFFFFF;
-        border: 1px solid #E5E7EB;
-        border-radius: 6px;
-        padding: 20px;
-        margin-bottom: 16px;
-    }
-    .card-featured {
-        border: 1px solid #15803D;
-        background-color: #FBFDFB;
-    }
-    .card-title {
-        font-size: 1.2rem;
-        font-weight: 700;
-        color: #111827;
-        margin-bottom: 2px;
-    }
-    .card-subtitle {
-        font-size: 0.85rem;
-        color: #6B7280;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        font-weight: 600;
-        margin-bottom: 14px;
-    }
-    .stat-pill {
-        display: inline-block;
-        background: #F3F4F6;
-        border: 1px solid #E5E7EB;
-        border-radius: 4px;
-        padding: 6px 12px;
-        margin-right: 8px;
-        margin-bottom: 8px;
-    }
-    .stat-pill-label {
-        font-size: 0.72rem;
-        color: #6B7280;
-        text-transform: uppercase;
-        font-weight: 600;
-        display: block;
-    }
-    .stat-pill-val {
-        font-size: 1.05rem;
-        font-weight: 700;
-        color: #111827;
-    }
-    .stat-pill-highlight {
-        background: #ECFDF5;
-        border-color: #A7F3D0;
-    }
-    .stat-pill-highlight .stat-pill-val {
-        color: #065F46;
-    }
-    .advisory-box {
-        background-color: #FFFBEB;
-        border-left: 3px solid #D97706;
-        padding: 10px 14px;
-        font-size: 0.88rem;
-        color: #78350F;
-        border-radius: 2px;
-        margin-top: 14px;
-    }
-    .section-summary {
-        background-color: #F9FAFB;
-        border: 1px solid #E5E7EB;
-        border-radius: 6px;
-        padding: 16px;
-        margin-bottom: 20px;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROCESSED_DIR = os.path.join(BASE_DIR, "data", "processed")
+CONFIG_DIR = os.path.join(BASE_DIR, "config")
 
-# -----------------------------------------------------------------------------
-# Data Presets
-# -----------------------------------------------------------------------------
-LOCATION_PRESETS = {
-    "Multan (Southern Punjab)": {
-        "lat": 30.1575, "lon": 71.5249, "soil": "Sandy Loam",
-        "water": "Canal (Non-perennial) + Tube Well", "rotation": "cotton_wheat",
-    },
-    "Faisalabad (Central Punjab)": {
-        "lat": 31.4504, "lon": 73.1350, "soil": "Loam",
-        "water": "Canal Irrigation (Perennial)", "rotation": "maize_wheat",
-    },
-    "Gujranwala (Upper Punjab)": {
-        "lat": 32.1877, "lon": 74.1945, "soil": "Clay Loam",
-        "water": "Canal Irrigation (Perennial)", "rotation": "rice_wheat",
-    },
-    "Bahawalpur (Southern Margin)": {
-        "lat": 29.3544, "lon": 71.6911, "soil": "Sandy Loam",
-        "water": "Tube Well (Fresh Groundwater)", "rotation": "cotton_wheat",
-    },
-    "Rahim Yar Khan": {
-        "lat": 28.4212, "lon": 70.2989, "soil": "Loam",
-        "water": "Canal (Non-perennial) + Tube Well", "rotation": "sugarcane_wheat",
-    },
-    "Sargodha (Mixed Grain / Citrus)": {
-        "lat": 32.0836, "lon": 72.6711, "soil": "Loam",
-        "water": "Canal Irrigation (Perennial)", "rotation": "maize_wheat",
-    },
-    "Sahiwal (Maize-Potato Belt)": {
-        "lat": 30.6682, "lon": 73.1114, "soil": "Silt Loam",
-        "water": "Canal Irrigation (Perennial)", "rotation": "maize_wheat",
-    },
-    "Custom Location (Enter Coordinates)": {
-        "lat": 30.1575, "lon": 71.5249, "soil": "Loam",
-        "water": "Canal Irrigation (Perennial)", "rotation": "cotton_wheat",
-    },
-}
-
-SOIL_OPTIONS = [
-    "Sandy Loam (Light, well-drained, lower water holding)",
-    "Loam (Balanced texture, good water and nutrient retention)",
-    "Clay Loam (Medium-heavy, holds moisture well)",
-    "Silt Loam (Fine textured, high water capacity)",
-    "Sandy (Light, drains quickly, prone to drying)",
-    "Clay (Heavy soil, slow drainage, retains water for ponding)",
-]
-
-SOIL_KEY_MAP = {
-    "Sandy Loam (Light, well-drained, lower water holding)": "Sandy Loam",
-    "Loam (Balanced texture, good water and nutrient retention)": "Loam",
-    "Clay Loam (Medium-heavy, holds moisture well)": "Clay Loam",
-    "Silt Loam (Fine textured, high water capacity)": "Silt Loam",
-    "Sandy (Light, drains quickly, prone to drying)": "Sandy",
-    "Clay (Heavy soil, slow drainage, retains water for ponding)": "Clay",
-}
-
-WATER_OPTIONS = [
-    "Canal Irrigation (Perennial - year-round)",
-    "Canal (Non-perennial) + Tube Well backup",
-    "Tube Well only (Fresh groundwater)",
-    "Tube Well only (Marginal / Saline groundwater)",
-    "Rainfed only (Barani - no irrigation)",
-]
-
-WATER_KEY_MAP = {
-    "Canal Irrigation (Perennial - year-round)": "Canal Irrigation (Perennial)",
-    "Canal (Non-perennial) + Tube Well backup": "Canal (Non-perennial) + Tube Well",
-    "Tube Well only (Fresh groundwater)": "Tube Well (Fresh Groundwater)",
-    "Tube Well only (Marginal / Saline groundwater)": "Tube Well (Marginal / Saline)",
-    "Rainfed only (Barani - no irrigation)": "Rainfed (Barani)",
-}
-
-CURRENT_ROTATION_CHOICES = {
-    "rice_wheat": "Rice then Wheat (Kharif rice followed by Rabi wheat)",
-    "cotton_wheat": "Cotton then Wheat (Kharif cotton followed by Rabi wheat)",
-    "maize_wheat": "Maize then Wheat (Kharif maize followed by Rabi wheat)",
-    "sugarcane_wheat": "Sugarcane then Wheat (Annual sugarcane cycle)",
-}
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_climate_data(latitude: float, longitude: float) -> pd.DataFrame:
-    """Download 10-year NASA POWER daily climate data."""
-    return fetch_nasa_power_data(latitude, longitude, DEFAULT_START_DATE, DEFAULT_END_DATE)
-
-
+# ---------------------------------------------------------------------------
+# Cached loaders
+# ---------------------------------------------------------------------------
 @st.cache_resource
-def load_rotation_scorer() -> RotationScorer:
-    """Load the scoring engine and dataset."""
+def load_scorer() -> RotationScorer:
     return RotationScorer()
 
 
-# -----------------------------------------------------------------------------
-# Top Header
-# -----------------------------------------------------------------------------
-st.markdown(
-    """
-    <div class="top-bar">
-        <h1 class="top-title">Field Shift</h1>
-        <p class="top-subtitle">Crop Rotation Planning Tool | NASA 10-Year Weather Data & Field-Level Soil Diagnostics</p>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-# -----------------------------------------------------------------------------
-# Step-by-Step Farmer Input Section
-# -----------------------------------------------------------------------------
-st.markdown("<div class='step-heading'>Step 1: Your Location & Field Conditions</div>", unsafe_allow_html=True)
-c_loc, c_soil, c_water = st.columns(3)
-
-with c_loc:
-    selected_preset = st.selectbox("Select Area", options=list(LOCATION_PRESETS.keys()), index=0)
-    preset = LOCATION_PRESETS[selected_preset]
-
-    if selected_preset == "Custom Location (Enter Coordinates)":
-        c_lat, c_lon = st.columns(2)
-        lat = c_lat.number_input("Latitude", -90.0, 90.0, 30.1575, format="%.4f")
-        lon = c_lon.number_input("Longitude", -180.0, 180.0, 71.5249, format="%.4f")
-    else:
-        lat = preset["lat"]
-        lon = preset["lon"]
-        st.caption(f"Coordinates: {lat:.4f}° N, {lon:.4f}° E")
-
-with c_soil:
-    default_soil_label = [opt for opt in SOIL_OPTIONS if SOIL_KEY_MAP[opt] == preset["soil"]][0]
-    soil_input = st.selectbox("Soil Type", options=SOIL_OPTIONS, index=SOIL_OPTIONS.index(default_soil_label))
-    selected_soil = SOIL_KEY_MAP[soil_input]
-
-with c_water:
-    default_water_label = [opt for opt in WATER_OPTIONS if WATER_KEY_MAP[opt] == preset["water"]][0]
-    water_input = st.selectbox("Water Source", options=WATER_OPTIONS, index=WATER_OPTIONS.index(default_water_label))
-    selected_water = WATER_KEY_MAP[water_input]
+def _load_sites() -> dict:
+    cfg = os.path.join(CONFIG_DIR, "sites.yaml")
+    if os.path.exists(cfg):
+        with open(cfg, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f).get("sites", {})
+    return {}
 
 
-st.markdown("<div class='step-heading' style='margin-top: 14px;'>Step 2: Current Crop Rotation & Farm Priorities</div>", unsafe_allow_html=True)
-c_rot, c_prio = st.columns([1, 2])
+SITES = _load_sites()
 
-with c_rot:
-    rot_keys = list(CURRENT_ROTATION_CHOICES.keys())
-    rot_idx = rot_keys.index(preset["rotation"]) if preset["rotation"] in rot_keys else 0
-    selected_rot = st.selectbox(
-        "Current Cropping Practice",
-        options=rot_keys,
-        format_func=lambda k: CURRENT_ROTATION_CHOICES[k],
-        index=rot_idx,
+# Fallback if sites.yaml is missing
+if not SITES:
+    SITES = {
+        "faisalabad": {
+            "name": "Faisalabad (Mixed Cropping)",
+            "district": "Faisalabad",
+            "lat": 31.4504,
+            "lon": 73.1350,
+            "soil_default": "Loam",
+            "water_default": "Canal Irrigation (Perennial)",
+            "rotation_default": "maize_wheat",
+            "zone": "Central Mixed Cropping Belt",
+        },
+        "multan": {
+            "name": "Multan (Southern Punjab)",
+            "district": "Multan",
+            "lat": 30.1968,
+            "lon": 71.4782,
+            "soil_default": "Sandy Loam",
+            "water_default": "Canal (Non-perennial) + Tube Well",
+            "rotation_default": "cotton_wheat",
+            "zone": "Cotton-Wheat Agro-Ecological Belt",
+        },
+    }
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_climate_records(site_key: str, lat: float, lon: float) -> Tuple[pd.DataFrame, str]:
+    """Load pre-computed offline data when available, otherwise fetch live."""
+    parquet_map = {
+        "faisalabad": "site_A_daily.parquet",
+        "multan": "site_B_daily.parquet",
+    }
+    fname = parquet_map.get(site_key)
+    if fname:
+        local_path = os.path.join(PROCESSED_DIR, fname)
+        if os.path.exists(local_path):
+            return pd.read_parquet(local_path), "Pre-fetched NASA POWER Data (Offline)"
+    df = fetch_nasa_power_data(lat, lon, DEFAULT_START_DATE, DEFAULT_END_DATE)
+    return df, "Live NASA POWER AG Query"
+
+
+# ---------------------------------------------------------------------------
+# Session state defaults
+# ---------------------------------------------------------------------------
+_defaults = {
+    "language": "English",
+    "site_key": list(SITES.keys())[0],
+    "soil_texture": list(SITES.values())[0].get("soil_default", "Loam"),
+    "water_source": list(SITES.values())[0].get("water_default", "Canal Irrigation (Perennial)"),
+    "current_rotation": list(SITES.values())[0].get("rotation_default", "rice_wheat"),
+    "weights": {"water_saving": 2.0, "soil_health": 2.0, "climate_resilience": 2.0, "income": 2.0},
+    "scenario_rain": 0,
+    "scenario_temp": 0.0,
+    "nav_page": "Overview",
+}
+for k, v in _defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+# ---------------------------------------------------------------------------
+# Sidebar: WORKSPACE navigation + language toggle
+# ---------------------------------------------------------------------------
+is_urdu = st.session_state["language"] == "اردو (Urdu)"
+apply_custom_theme(is_urdu=is_urdu)
+
+with st.sidebar:
+    st.markdown(
+        "<div style='font-size: 0.72rem; font-weight: 700; color: #6B7280; "
+        "letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 8px;'>"
+        "WORKSPACE</div>",
+        unsafe_allow_html=True,
     )
 
-with c_prio:
-    st.write("**What are your main goals?**")
-    p_col1, p_col2, p_col3, p_col4 = st.columns(4)
-    with p_col1:
-        w_water = st.select_slider("Save Water", options=["Low", "Medium", "High"], value="High")
-    with p_col2:
-        w_soil = st.select_slider("Improve Soil", options=["Low", "Medium", "High"], value="High")
-    with p_col3:
-        w_resil = st.select_slider("Climate Safety", options=["Low", "Medium", "High"], value="Medium")
-    with p_col4:
-        w_income = st.select_slider("Farm Income", options=["Low", "Medium", "High"], value="High")
+    nav_options = ["Overview", "My Farm", "NASA Insights", "Crop Rotations", "Reports", "Data & Method"]
+    curr_idx = nav_options.index(st.session_state["nav_page"]) if st.session_state["nav_page"] in nav_options else 0
+    selected_page = st.radio(
+        "nav",
+        options=nav_options,
+        index=curr_idx,
+        label_visibility="collapsed",
+    )
+    st.session_state["nav_page"] = selected_page
 
-# Convert sliders to numerical weights
-scale_map = {"Low": 1.0, "Medium": 2.0, "High": 3.0}
-priority_weights = {
-    "water_saving": scale_map[w_water],
-    "soil_health": scale_map[w_soil],
-    "climate_resilience": scale_map[w_resil],
-    "income": scale_map[w_income],
-}
+    st.markdown("---")
 
-# Optional settings in a simple expander
-with st.expander("Optional: Weather Testing & Satellite Check", expanded=False):
-    opt_col1, opt_col2, opt_col3 = st.columns(3)
-    with opt_col1:
-        scenario_rain_pct = st.slider("Test rainfall change (%)", -30, 30, 0, 5, help="Simulate drier or wetter years.")
-    with opt_col2:
-        scenario_temp_c = st.slider("Test temperature increase (°C)", 0.0, 4.0, 0.0, 0.5, help="Simulate hotter summer or spring temperatures.")
-    with opt_col3:
-        include_modis = st.checkbox("Check satellite ground cover (MODIS)", value=True, help="Estimates how many days a year the field sits bare without crop canopy.")
+    lang_choice = st.selectbox(
+        "Language / زبان",
+        options=["English", "اردو (Urdu)"],
+        index=0 if st.session_state["language"] == "English" else 1,
+    )
+    if lang_choice != st.session_state["language"]:
+        st.session_state["language"] = lang_choice
+        st.rerun()
 
-submit_eval = st.button("Compare Crop Rotations", type="primary")
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    st.caption("Field Shift v1.3  •  NASA Space Apps 2026")
+    st.caption("Team astrooLogic (Lahore)")
 
-# -----------------------------------------------------------------------------
-# Data Retrieval & Calculations
-# -----------------------------------------------------------------------------
-if submit_eval or "active_climate" not in st.session_state:
-    try:
-        with st.spinner("Loading 10-year NASA climate records for your location..."):
-            climate_df = load_climate_data(lat, lon)
-            st.session_state["active_climate"] = climate_df
-            st.session_state["active_lat"] = lat
-            st.session_state["active_lon"] = lon
-    except (ValueError, NasaPowerError) as err:
-        st.error(f"Weather Data Error: {err}")
-        st.stop()
-
-climate_df = st.session_state["active_climate"]
-scorer = load_rotation_scorer()
+# ---------------------------------------------------------------------------
+# Shared data computation (runs on every page)
+# ---------------------------------------------------------------------------
+site_info = SITES.get(
+    st.session_state["site_key"],
+    list(SITES.values())[0],
+)
+target_lat = float(site_info["lat"])
+target_lon = float(site_info["lon"])
 
 try:
+    climate_df, source_label = load_climate_records(st.session_state["site_key"], target_lat, target_lon)
     climate_analysis = analyse_climate(climate_df, DEFAULT_SEASONS)
-except Exception as exc:
-    st.error(f"Error analyzing climate records: {exc}")
+except Exception as err:
+    st.error(f"Error loading climate records: {err}")
     st.stop()
 
-# Key aggregate metrics
 seasonal_df = climate_analysis.seasonal_indicators
 avg_annual_rain = float(climate_df["precip_mm_day"].sum()) / (len(climate_df) / 365.25)
 max_dry_run = int(seasonal_df["max_dry_spell_days"].max()) if not seasonal_df.empty else 0
-avg_heat_days_yr = float(seasonal_df["heat_days"].mean() * 2) if not seasonal_df.empty else 0
+avg_heat_days = float(seasonal_df["heat_days"].mean() * 2) if not seasonal_df.empty else 0
 
-# MODIS summary if enabled
-modis_summary = None
-if include_modis:
-    modis_df = fetch_modis_ndvi_data(lat, lon, DEFAULT_START_DATE, DEFAULT_END_DATE, climate_df=climate_df)
-    modis_summary = summarize_bare_soil_exposure(modis_df)
+modis_df = fetch_modis_ndvi_data(target_lat, target_lon, DEFAULT_START_DATE, DEFAULT_END_DATE, climate_df=climate_df)
+modis_summary = summarize_bare_soil_exposure(modis_df)
 
-# Run comparison
-cards = scorer.compare_rotations(
-    current_rotation_key=selected_rot,
-    soil_texture=selected_soil,
-    water_source=selected_water,
+scorer = load_scorer()
+rotation_cards = scorer.compare_rotations(
+    current_rotation_key=st.session_state["current_rotation"],
+    soil_texture=st.session_state["soil_texture"],
+    water_source=st.session_state["water_source"],
     annual_rainfall_mm=avg_annual_rain,
     max_dry_spell_days=max_dry_run,
-    annual_heat_days=avg_heat_days_yr,
-    priority_weights=priority_weights,
-    rainfall_scenario_pct=scenario_rain_pct,
-    temperature_scenario_c=scenario_temp_c,
+    annual_heat_days=avg_heat_days,
+    priority_weights=st.session_state["weights"],
+    rainfall_scenario_pct=st.session_state["scenario_rain"],
+    temperature_scenario_c=st.session_state["scenario_temp"],
 )
+mc_results: Dict[str, UncertaintySummary] = run_monte_carlo_analysis(rotation_cards, n_simulations=500, random_seed=42)
 
-# -----------------------------------------------------------------------------
-# Results Section
-# -----------------------------------------------------------------------------
-st.markdown("---")
-st.markdown("### Field Summary & 10-Year Climate Exposure")
+best_key = max(rotation_cards, key=lambda k: rotation_cards[k].composite_score)
+best_card = rotation_cards[best_key]
+best_mc = mc_results[best_key]
 
-# 3 or 4 clear summary tiles
-s_col1, s_col2, s_col3, s_col4 = st.columns(4)
-with s_col1:
-    s_col1.markdown(
+top_header(is_urdu=is_urdu)
+
+# ===========================================================================
+# PAGE: OVERVIEW
+# ===========================================================================
+if st.session_state["nav_page"] == "Overview":
+    greeting = "خوش آمدید، کسان بھائی!" if is_urdu else "Welcome, Farmer."
+    subtext = (
+        "آئیے آپ کی زمین اور آب و ہوا کے مطابق بہترین فصلوں کا انتخاب کریں۔"
+        if is_urdu
+        else "Find a smarter crop rotation based on 10 years of NASA satellite climate data for your field."
+    )
+
+    st.markdown(f"<h1 style='font-size:1.85rem;font-weight:800;color:#111827;margin-bottom:2px;'>{greeting}</h1>", unsafe_allow_html=True)
+    st.markdown(f"<p style='font-size:0.98rem;color:#4B5563;margin-bottom:20px;'>{subtext}</p>", unsafe_allow_html=True)
+
+    current_rot_name = ROTATION_CATALOG.get(st.session_state["current_rotation"], {}).get("name", "")
+    farm_profile_card(
+        site_name=f"{site_info['name']} ({target_lat:.2f}° N, {target_lon:.2f}° E)",
+        soil=st.session_state["soil_texture"],
+        water=st.session_state["water_source"],
+        rotation_name=current_rot_name,
+        status="Ready to analyze",
+    )
+
+    st.markdown(
+        "<div style='font-size:0.82rem;font-weight:700;color:#6B7280;text-transform:uppercase;margin-bottom:10px;'>"
+        "10-Year Environmental Summary (NASA POWER)</div>",
+        unsafe_allow_html=True,
+    )
+    r1, r2 = st.columns(2)
+    insight_card(r1, "Average Annual Rainfall", f"{avg_annual_rain:.0f} mm", "10-year mean precipitation", source=source_label)
+    insight_card(r2, "Heat Risk Days (>35°C)", f"{avg_heat_days:.0f} days / year", "Days exceeding heat stress threshold", source=source_label)
+
+    st.markdown("<div style='margin-top:12px;'></div>", unsafe_allow_html=True)
+    r3, r4 = st.columns(2)
+    insight_card(r3, "Bare Ground Exposure", f"{modis_summary.annual_bare_days:.0f} days / year", "Days with NDVI < 0.20 (no canopy)", source="MODIS Satellite")
+    insight_card(r4, "Longest Drought Run", f"{max_dry_run} days", "Consecutive days with < 1 mm rainfall", source=source_label)
+
+    st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
+    if st.button("Analyze my crop rotation options →", type="primary", use_container_width=True):
+        st.session_state["nav_page"] = "Crop Rotations"
+        st.rerun()
+
+    persistent_expert_banner(is_urdu=is_urdu)
+
+
+# ===========================================================================
+# PAGE: MY FARM
+# ===========================================================================
+elif st.session_state["nav_page"] == "My Farm":
+    st.markdown("## My Farm Profile")
+    st.write("Set your field location, soil type, irrigation source, current crop rotation, and priorities.")
+
+    with st.form("farm_profile_form"):
+        st.markdown("### 1. Location")
+        preset_keys = list(SITES.keys())
+        site_names = [SITES[k]["name"] for k in preset_keys]
+        curr_site_idx = preset_keys.index(st.session_state["site_key"]) if st.session_state["site_key"] in preset_keys else 0
+        chosen_site_name = st.selectbox("Select Punjab District", options=site_names, index=curr_site_idx)
+        chosen_site_key = preset_keys[site_names.index(chosen_site_name)]
+
+        st.markdown("### 2. Soil & Water")
+        c_s1, c_s2 = st.columns(2)
+        soil_options = ["Sandy Loam", "Loam", "Clay Loam", "Silt Loam", "Sandy", "Clay"]
+        water_options = [
+            "Canal Irrigation (Perennial)",
+            "Canal (Non-perennial) + Tube Well",
+            "Tube Well (Fresh Groundwater)",
+            "Tube Well (Marginal / Saline)",
+            "Rainfed (Barani)",
+        ]
+        with c_s1:
+            soil_idx = soil_options.index(st.session_state["soil_texture"]) if st.session_state["soil_texture"] in soil_options else 1
+            chosen_soil = st.selectbox("Soil Texture", soil_options, index=soil_idx)
+        with c_s2:
+            water_idx = water_options.index(st.session_state["water_source"]) if st.session_state["water_source"] in water_options else 0
+            chosen_water = st.selectbox("Primary Irrigation Source", water_options, index=water_idx)
+
+        st.markdown("### 3. Current Cropping Practice")
+        rot_keys = list(ROTATION_CATALOG.keys())
+        curr_rot_idx = rot_keys.index(st.session_state["current_rotation"]) if st.session_state["current_rotation"] in rot_keys else 0
+        chosen_rot = st.selectbox(
+            "Current Annual Rotation",
+            options=rot_keys,
+            format_func=lambda k: ROTATION_CATALOG[k]["name"],
+            index=curr_rot_idx,
+        )
+
+        st.markdown("### 4. Farm Priorities")
+        st.caption("Set what matters most to your farm. These weights guide which rotation the tool recommends.")
+        p1, p2, p3, p4 = st.columns(4)
+        w_w = p1.slider("Save Water", 0.0, 3.0, float(st.session_state["weights"]["water_saving"]), 0.5)
+        w_s = p2.slider("Improve Soil", 0.0, 3.0, float(st.session_state["weights"]["soil_health"]), 0.5)
+        w_r = p3.slider("Climate Safety", 0.0, 3.0, float(st.session_state["weights"]["climate_resilience"]), 0.5)
+        w_i = p4.slider("Farm Income", 0.0, 3.0, float(st.session_state["weights"]["income"]), 0.5)
+
+        if st.form_submit_button("Save Profile & Recalculate", type="primary"):
+            st.session_state["site_key"] = chosen_site_key
+            st.session_state["soil_texture"] = chosen_soil
+            st.session_state["water_source"] = chosen_water
+            st.session_state["current_rotation"] = chosen_rot
+            st.session_state["weights"] = {"water_saving": w_w, "soil_health": w_s, "climate_resilience": w_r, "income": w_i}
+            st.success("Farm profile updated.")
+            st.session_state["nav_page"] = "Crop Rotations"
+            st.rerun()
+
+    persistent_expert_banner(is_urdu=is_urdu)
+
+
+# ===========================================================================
+# PAGE: NASA INSIGHTS
+# ===========================================================================
+elif st.session_state["nav_page"] == "NASA Insights":
+    st.markdown("## NASA Agro-Climatology Insights")
+    st.caption(f"10-Year Reanalysis (2016–2025) · {site_info['name']} · {target_lat:.2f}° N, {target_lon:.2f}° E")
+
+    t1, t2 = st.tabs(["Precipitation & Water", "Temperature & Heat Stress"])
+
+    with t1:
+        st.markdown("### Annual Precipitation vs 10-Year Mean")
+        yearly_rain = climate_df.groupby(climate_df.index.year)["precip_mm_day"].sum().reset_index()
+        yearly_rain.columns = ["Year", "Rainfall (mm)"]
+        fig_rain = px.bar(
+            yearly_rain, x="Year", y="Rainfall (mm)",
+            title=f"Annual Rainfall — 10-Year Mean: {avg_annual_rain:.0f} mm",
+            color_discrete_sequence=["#1B4D3E"],
+        )
+        fig_rain.add_hline(y=avg_annual_rain, line_dash="dash", line_color="#D97706", annotation_text="10-Year Mean")
+        fig_rain.update_layout(plot_bgcolor="white", paper_bgcolor="white")
+        st.plotly_chart(fig_rain, use_container_width=True)
+
+        st.markdown("### Root-Zone Soil Moisture (GWETROOT)")
+        if climate_analysis.soil_moisture.available and not climate_analysis.soil_moisture.table.empty:
+            sm_df = climate_analysis.soil_moisture.table[
+                ["season_label", "mean_soil_wetness", "baseline_mean", "anomaly"]
+            ].rename(columns={
+                "season_label": "Season",
+                "mean_soil_wetness": "Mean Wetness (0–1)",
+                "baseline_mean": "Baseline",
+                "anomaly": "Anomaly",
+            }).round(3)
+            st.dataframe(sm_df, hide_index=True, use_container_width=True)
+        else:
+            st.info("Soil moisture data not available for this location.")
+
+    with t2:
+        st.markdown("### Extreme Heat Days (>35°C) per Year")
+        hot = climate_df[climate_df["tmax_c"] > 35.0]
+        yearly_heat = hot.groupby(hot.index.year).size().reset_index()
+        yearly_heat.columns = ["Year", "Hot Days (>35°C)"]
+        fig_heat = px.line(
+            yearly_heat, x="Year", y="Hot Days (>35°C)",
+            markers=True,
+            title="Trend of Extreme Heat Days (>35°C)",
+            color_discrete_sequence=["#B91C1C"],
+        )
+        fig_heat.update_layout(plot_bgcolor="white", paper_bgcolor="white")
+        st.plotly_chart(fig_heat, use_container_width=True)
+
+    st.markdown("### Bare Ground & Fallow Dynamics (MODIS Satellite)")
+    st.write(
+        f"Satellite records estimate fields in this zone sit bare without vegetative canopy for approximately "
+        f"**{modis_summary.annual_bare_days:.0f} days per year** (primarily May–June between wheat harvest and rice/cotton transplanting). "
+        f"Extended bare-soil periods accelerate organic matter loss and evaporative water waste."
+    )
+
+    persistent_expert_banner(is_urdu=is_urdu)
+
+
+# ===========================================================================
+# PAGE: CROP ROTATIONS
+# ===========================================================================
+elif st.session_state["nav_page"] == "Crop Rotations":
+    st.markdown("## Crop Rotation Advisor")
+    st.write("Comparing your current practice against three agronomically suited alternatives for your soil and water conditions.")
+
+    # Top recommendation banner
+    st.markdown(
         f"""
-        <div class="stat-pill" style="width: 100%;">
-            <span class="stat-pill-label">Average Annual Rain</span>
-            <span class="stat-pill-val">{avg_annual_rain:.0f} mm</span>
+        <div style="background:#ECFDF5;border:1.5px solid #059669;border-radius:10px;padding:18px;margin-bottom:22px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <div>
+                    <span style="font-size:0.75rem;font-weight:700;color:#065F46;text-transform:uppercase;">Top Recommended Strategy</span>
+                    <div style="font-size:1.35rem;font-weight:800;color:#064E3B;">{best_card.rotation_name}</div>
+                    <div style="font-size:0.9rem;color:#047857;margin-top:2px;">{best_card.why_suggested}</div>
+                </div>
+                <div style="text-align:right;min-width:130px;">
+                    <div style="font-size:1.8rem;font-weight:900;color:#065F46;">{best_card.composite_score:.1f}</div>
+                    <span class="status-pill">Rank #1 in {best_mc.win_rate_pct:.0f}% of simulations</span>
+                </div>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-with s_col2:
-    s_col2.markdown(
-        f"""
-        <div class="stat-pill" style="width: 100%;">
-            <span class="stat-pill-label">Longest Dry Spell on Record</span>
-            <span class="stat-pill-val">{max_dry_run} days</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
+
+    display_order = [
+        ("current", "Current Baseline Practice", False),
+        ("soil_health", "Alternative 1: Soil Health & Pulse Option", True),
+        ("water_saving", "Alternative 2: Water-Saving Option", True),
+        ("climate_resilient", "Alternative 3: Climate-Resilient Option", True),
+    ]
+
+    c_left, c_right = st.columns(2)
+
+    for i, (k, title_prefix, featured) in enumerate(display_order):
+        col = c_left if i % 2 == 0 else c_right
+        card: RotationScoreCard = rotation_cards[k]
+        mc: UncertaintySummary = mc_results[k]
+
+        with col:
+            border_cls = "app-card app-card-featured" if featured else "app-card"
+            st.markdown(
+                f"""
+                <div class="{border_cls}">
+                    <div class="card-header-label">{title_prefix}</div>
+                    <div class="card-title-lg">{card.rotation_name}</div>
+                    <div style="font-size:0.85rem;color:#6B7280;margin-bottom:12px;">{card.category}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Water Need", f"{card.total_water_need_mm:.0f} mm")
+            m2.metric("Water Score", f"{card.water_saving_score:.0f}/100")
+            m3.metric("Soil Score", f"{card.soil_health_score:.0f}/100")
+            m4.metric("Resilience", f"{card.climate_resilience_score:.0f}/100")
+
+            if card.has_legume:
+                st.markdown(
+                    f"<span class='status-pill' style='margin-bottom:8px;'>N Fixed: ~{card.nitrogen_credit_kg_ha:.0f} kg/ha</span>",
+                    unsafe_allow_html=True,
+                )
+
+            with st.expander("Agronomic Assessment, Benefits & Risks", expanded=True):
+                st.markdown(f"**Why this rotation:** {card.why_suggested}")
+
+                st.markdown("**Practical Benefits:**")
+                for b in card.benefits:
+                    st.markdown(f"- {b}")
+
+                st.markdown("**Risks & Watch Points:**")
+                for r in card.risks:
+                    st.markdown(f"- {r}")
+
+                st.markdown("**Confirm Locally:**")
+                for g in card.information_gaps:
+                    st.markdown(f"- {g}")
+
+                st.markdown(
+                    f"""<div class="advisory-notice"><strong>Agronomist Note:</strong> {card.agronomist_note}</div>""",
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+    # Summary table
+    st.markdown("### Comparative Performance & Uncertainty Summary")
+    summary_rows = []
+    for k in ["current", "soil_health", "water_saving", "climate_resilient"]:
+        c = rotation_cards[k]
+        m = mc_results[k]
+        summary_rows.append({
+            "Rotation": c.rotation_name,
+            "Water Need (mm)": f"{c.total_water_need_mm:.0f}",
+            "Water Score": f"{c.water_saving_score:.0f}/100",
+            "Soil Score": f"{c.soil_health_score:.0f}/100",
+            "Resilience": f"{c.climate_resilience_score:.0f}/100",
+            "Score Range (10–90%)": f"{m.p10_score:.0f} – {m.p90_score:.0f}",
+            "Win Rate": f"{m.win_rate_pct:.0f}%",
+            "Confidence": m.confidence_level,
+        })
+    st.dataframe(pd.DataFrame(summary_rows), hide_index=True, use_container_width=True)
+
+    # What-if
+    with st.expander("What-If Climate Stress Testing", expanded=False):
+        sc1, sc2 = st.columns(2)
+        rain_shift = sc1.slider("Rainfall scenario (%)", -30, 30, st.session_state["scenario_rain"], 5)
+        temp_shift = sc2.slider("Temperature rise scenario (°C)", 0.0, 4.0, float(st.session_state["scenario_temp"]), 0.5)
+        if rain_shift != st.session_state["scenario_rain"] or temp_shift != st.session_state["scenario_temp"]:
+            st.session_state["scenario_rain"] = rain_shift
+            st.session_state["scenario_temp"] = temp_shift
+            st.rerun()
+
+    persistent_expert_banner(is_urdu=is_urdu)
+
+
+# ===========================================================================
+# PAGE: REPORTS
+# ===========================================================================
+elif st.session_state["nav_page"] == "Reports":
+    st.markdown("## Evaluation Report & Export")
+    st.write("Summary of the farm evaluation for download or sharing with an agronomist.")
+
+    report_data = {
+        "Farm Location": site_info["name"],
+        "Coordinates": f"{target_lat:.4f}° N, {target_lon:.4f}° E",
+        "Soil Texture": st.session_state["soil_texture"],
+        "Water Access": st.session_state["water_source"],
+        "Current Rotation": ROTATION_CATALOG.get(st.session_state["current_rotation"], {}).get("name", ""),
+        "10-Year Mean Rainfall": f"{avg_annual_rain:.0f} mm",
+        "Annual Bare Soil Days": f"{modis_summary.annual_bare_days:.0f} days",
+        "Top Recommended Rotation": best_card.rotation_name,
+        "Recommendation Win Rate": f"{best_mc.win_rate_pct:.0f}% of simulations",
+    }
+
+    st.table(pd.DataFrame(list(report_data.items()), columns=["Parameter", "Value"]))
+
+    export_df = pd.DataFrame([
+        {
+            "rotation_id": k,
+            "rotation_name": rotation_cards[k].rotation_name,
+            "water_need_mm": rotation_cards[k].total_water_need_mm,
+            "water_score": rotation_cards[k].water_saving_score,
+            "soil_score": rotation_cards[k].soil_health_score,
+            "resilience_score": rotation_cards[k].climate_resilience_score,
+            "composite_score": rotation_cards[k].composite_score,
+            "win_rate_pct": mc_results[k].win_rate_pct,
+            "confidence": mc_results[k].confidence_level,
+        }
+        for k in rotation_cards
+    ])
+
+    st.download_button(
+        label="Download Rotation Scores (CSV)",
+        data=export_df.to_csv(index=False).encode("utf-8"),
+        file_name=f"field_shift_scores_{st.session_state['site_key']}.csv",
+        mime="text/csv",
     )
-with s_col3:
-    s_col3.markdown(
-        f"""
-        <div class="stat-pill" style="width: 100%;">
-            <span class="stat-pill-label">Hot Days per Year (>35°C)</span>
-            <span class="stat-pill-val">{avg_heat_days_yr:.0f} days</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
+
+    persistent_expert_banner(is_urdu=is_urdu)
+
+
+# ===========================================================================
+# PAGE: DATA & METHOD
+# ===========================================================================
+elif st.session_state["nav_page"] == "Data & Method":
+    st.markdown("## Data Sources & Scientific Methodology")
+    st.caption("Full transparency on NASA products, spatial resolution, and model limitations.")
+
+    st.markdown("### 1. NASA & Earth Observation Resources")
+    res_table = [
+        {"Resource": "NASA POWER AG Daily API", "Resolution": "~50 km (0.5° × 0.625°)", "Period": "2016–2025 (Daily)", "Role": "Precipitation, Tmax, Tmin, solar radiation, humidity, wind speed"},
+        {"Resource": "NASA MERRA-2 (GWETROOT)", "Resolution": "~50 km", "Period": "2016–2025 (Daily)", "Role": "Model root-zone soil wetness (0 = dry, 1 = saturated)"},
+        {"Resource": "MODIS Terra/Aqua (MOD13Q1)", "Resolution": "250 m", "Period": "16-day composite", "Role": "Vegetation NDVI — bare ground exposure (NDVI < 0.20)"},
+        {"Resource": "FAO-56 Penman-Monteith", "Resolution": "Field scale", "Period": "Physical model", "Role": "Reference evapotranspiration (ET0) and crop water demand"},
+    ]
+    st.dataframe(pd.DataFrame(res_table), hide_index=True, use_container_width=True)
+
+    st.markdown("### 2. Data Limitations")
+    st.write(
+        "NASA POWER and MERRA-2 provide gridded estimates (~50 km cells), not field-level weather station readings. "
+        "Root-zone wetness (GWETROOT) is a physics-based model product, not a direct satellite measurement. "
+        "Field Shift outputs are comparative guides intended to inform discussions with extension agronomists, not to replace them."
     )
-with s_col4:
-    if modis_summary:
-        s_col4.markdown(
-            f"""
-            <div class="stat-pill" style="width: 100%;">
-                <span class="stat-pill-label">Satellite Bare Soil Exposure</span>
-                <span class="stat-pill-val">{modis_summary.annual_bare_days:.0f} days / yr</span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    else:
-        s_col4.markdown(
-            f"""
-            <div class="stat-pill" style="width: 100%;">
-                <span class="stat-pill-label">Soil & Water Regime</span>
-                <span class="stat-pill-val">{selected_soil}</span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
 
-if modis_summary and modis_summary.annual_bare_days > 80:
-    st.info(f"Field Notice: Satellite records show your soil sits unplanted for about {modis_summary.annual_bare_days:.0f} days each year. Introducing a short pulse or cover crop helps keep the soil moist and prevents organic matter loss from extreme sun exposure.")
+    st.markdown("### 3. Scientific Glossary")
+    glossary = {
+        "Reference Evapotranspiration (ET0)": "Water loss rate from a 0.12 m grass surface under adequate water supply, per FAO-56 Penman-Monteith.",
+        "Root-Zone Wetness (GWETROOT)": "Soil saturation degree from surface to ~1 m depth, scaled 0 (dry) to 1 (saturated), from MERRA-2.",
+        "NDVI": "Normalized Difference Vegetation Index — satellite greenness indicator. Values < 0.20 indicate bare/unplanted ground.",
+        "Biological Nitrogen Credit": "Atmospheric nitrogen fixed into plant-available form by legume root nodules (chickpea, mungbean, lentil), reducing fertilizer demand.",
+        "Monte Carlo Simulation": "500 stochastic draws over uncertain agronomic and climate parameters to quantify rank stability and win probability.",
+    }
+    for term, defn in glossary.items():
+        st.markdown(f"- **{term}**: {defn}")
 
+    st.markdown("### 4. AI Contribution Disclosure")
+    st.write(
+        "Per NASA Space Apps 2026 guidelines, AI tools (Antigravity/Gemini) were used as engineering assistants "
+        "for code structuring, formula translation, and documentation drafts. All agronomic logic, dataset "
+        "verification, and submission decisions were governed by team members Ayesha Rafaqat and Sara Haris."
+    )
 
-# -----------------------------------------------------------------------------
-# Rotation Cards: Current + 3 Alternatives
-# -----------------------------------------------------------------------------
-st.markdown("### Crop Rotation Comparison")
-st.write("Comparing your current practice against three practical alternatives suited for your soil and water access:")
-
-card_order = [
-    ("current", "Current Baseline Practice", False),
-    ("soil_health", "Alternative 1: Soil Health & Pulse Option", True),
-    ("water_saving", "Alternative 2: Water-Saving Option", True),
-    ("climate_resilient", "Alternative 3: Climate-Resilient Option", True),
-]
-
-col_left, col_right = st.columns(2)
-
-for i, (key, heading, is_featured) in enumerate(card_order):
-    card_data: RotationScoreCard = cards[key]
-    target_col = col_left if (i % 2 == 0) else col_right
-
-    with target_col:
-        box_style = "card card-featured" if is_featured else "card"
-        st.markdown(
-            f"""
-            <div class="{box_style}">
-                <div class="card-subtitle">{heading}</div>
-                <div class="card-title">{card_data.rotation_name}</div>
-                <div style="font-size: 0.88rem; color: #4B5563; margin-bottom: 12px;">{card_data.category}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        # Clean Metric Pills
-        m1, m2, m3 = st.columns(3)
-        with m1:
-            st.markdown(
-                f"""
-                <div class="stat-pill" style="width: 100%;">
-                    <span class="stat-pill-label">Water Needed</span>
-                    <span class="stat-pill-val">{card_data.total_water_need_mm:.0f} mm</span>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        with m2:
-            st.markdown(
-                f"""
-                <div class="stat-pill {'stat-pill-highlight' if card_data.water_saving_score > 60 else ''}" style="width: 100%;">
-                    <span class="stat-pill-label">Water Efficiency</span>
-                    <span class="stat-pill-val">{card_data.water_saving_score:.0f} / 100</span>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        with m3:
-            st.markdown(
-                f"""
-                <div class="stat-pill {'stat-pill-highlight' if card_data.nitrogen_credit_kg_ha > 0 else ''}" style="width: 100%;">
-                    <span class="stat-pill-label">Nitrogen Added</span>
-                    <span class="stat-pill-val">{card_data.nitrogen_credit_kg_ha:.0f} kg / ha</span>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-        with st.expander("Details, Benefits & What to Check", expanded=True):
-            st.markdown(f"**Why this rotation:** {card_data.why_suggested}")
-
-            st.markdown("**Direct Practical Benefits:**")
-            for b in card_data.benefits:
-                st.markdown(f"- {b}")
-
-            st.markdown("**Things to Watch Out For (Risks):**")
-            for r in card_data.risks:
-                st.markdown(f"- {r}")
-
-            st.markdown("**What to Confirm Locally:**")
-            for g in card_data.information_gaps:
-                st.markdown(f"- {g}")
-
-            st.markdown(
-                f"""
-                <div class="advisory-box">
-                    <strong>Agronomist Note:</strong> {card_data.agronomist_note}
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-        st.markdown("<br>", unsafe_allow_html=True)
-
-
-# -----------------------------------------------------------------------------
-# High-Level Side-by-Side Summary Table
-# -----------------------------------------------------------------------------
-st.markdown("### Summary Table")
-
-tbl_data = []
-for k, label in [
-    ("current", "Current: " + cards["current"].rotation_name),
-    ("soil_health", "Soil Health: " + cards["soil_health"].rotation_name),
-    ("water_saving", "Water Saving: " + cards["water_saving"].rotation_name),
-    ("climate_resilient", "Climate Resilient: " + cards["climate_resilient"].rotation_name),
-]:
-    c = cards[k]
-    tbl_data.append({
-        "Option": label,
-        "Total Water Need (mm)": f"{c.total_water_need_mm:.0f} mm",
-        "Water Score": f"{c.water_saving_score:.0f}/100",
-        "Soil Health Score": f"{c.soil_health_score:.0f}/100",
-        "Resilience Score": f"{c.climate_resilience_score:.0f}/100",
-        "Nitrogen Credit": f"{c.nitrogen_credit_kg_ha:.0f} kg/ha" if c.has_legume else "None",
-        "Overall Fit": f"{c.composite_score:.1f}/100",
-    })
-
-st.dataframe(pd.DataFrame(tbl_data), hide_index=True, use_container_width=True)
-
-# -----------------------------------------------------------------------------
-# Technical Records (Collapsed for farmers; available for agronomists)
-# -----------------------------------------------------------------------------
-with st.expander("Detailed 10-Year Weather Records (NASA POWER Daily Data)", expanded=False):
-    st.write("Seasonal breakdown (Rabi: Nov-Apr, Kharif: May-Oct):")
-    clean_seasonal = seasonal_df[[
-        "season_label", "total_precip_mm", "max_dry_spell_days", "heat_days", "frost_days"
-    ]].rename(columns={
-        "season_label": "Season",
-        "total_precip_mm": "Total Rainfall (mm)",
-        "max_dry_spell_days": "Longest Dry Run (days)",
-        "heat_days": "Days Above 35°C",
-        "frost_days": "Days Below 0°C",
-    })
-    st.dataframe(clean_seasonal, hide_index=True, use_container_width=True)
-
-st.markdown("---")
-st.caption(
-    "Field Shift Decision Support Tool | Data: NASA POWER Agro-Climatology Daily API & MODIS Terra/Aqua Surface Reflectance."
-)
+    persistent_expert_banner(is_urdu=is_urdu)
