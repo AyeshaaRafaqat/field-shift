@@ -159,3 +159,4 @@ Open your browser at `http://localhost:8501`.
 
 - Climate data provided courtesy of the NASA Langley Research Center POWER Project funded through the NASA Earth Science / Applied Science Program.
 - Satellite greenness metrics derived from NASA LP DAAC MODIS Terra/Aqua observations.
+
